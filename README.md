@@ -32,22 +32,33 @@ Tu obtiens deux URLs Vercel distinctes (ex :
 propres sous-domaines (`terrain.allogaz.com`, `admin.allogaz.com`) dans
 Vercel → Settings → Domains.
 
-## Prochaine étape : brancher Supabase
+## Supabase est déjà branché — il ne reste que la config
 
-Les deux apps tournent pour l'instant avec des données d'exemple en
-mémoire. Pour les connecter à ta vraie base :
+Les deux apps utilisent maintenant `@supabase/supabase-js` : vraie
+authentification (email/mot de passe), insertion/lecture de
+`field_visits`, et abonnement Realtime côté admin. Il ne reste que 3
+choses à faire pour que ça tourne :
 
-```bash
-npm install @supabase/supabase-js
-```
+1. **Renseigner les identifiants Supabase.** Dans `demarcheur/` et dans
+   `admin/`, copie `.env.example` en `.env.local` (non versionné) et
+   remplace par ton URL et ta clé anon (Supabase → Project Settings →
+   API).
 
-Puis crée un fichier `.env.local` (non versionné) dans chaque dossier :
+2. **Ajouter les mêmes variables dans Vercel.** Pour chacun des deux
+   projets Vercel : Settings → Environment Variables → ajoute
+   `VITE_SUPABASE_URL` et `VITE_SUPABASE_ANON_KEY`, puis redéploie
+   (Vercel ne relit pas les variables sans un nouveau déploiement).
 
-```
-VITE_SUPABASE_URL=https://xxxx.supabase.co
-VITE_SUPABASE_ANON_KEY=xxxx
-```
+3. **Activer Realtime sur `field_visits`.** Dans Supabase → Database →
+   Replication, active la réplication pour la table `field_visits` —
+   sinon le dashboard admin se charge bien au démarrage mais ne reçoit
+   pas les nouvelles fiches en direct.
 
-Et dans Vercel, ajoute ces deux mêmes variables (Settings → Environment
-Variables) pour chacun des deux projets, sinon le build de production ne
-les aura pas.
+## Créer les premiers comptes de test
+
+Un compte agent : dans Supabase → Authentication → Users → Add user,
+puis dans SQL Editor : `update public.profiles set role = 'demarcheur' where id = '...';`
+(le trigger `handle_new_user` crée déjà le profil automatiquement à la
+création du compte).
+
+Un compte admin : même chose avec `role = 'admin'`.

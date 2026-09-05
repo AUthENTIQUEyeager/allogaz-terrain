@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { supabase } from "./lib/supabase";
 import {
   MapPin,
   ClipboardList,
@@ -26,63 +27,58 @@ const REFUS_REASONS = [
   "Autre",
 ];
 
-const SEED_FICHES = [
-  {
-    id: "f1",
-    shopName: "Dépôt Gaz Somgandé",
-    phone: "70 12 34 56",
-    city: "Ouagadougou",
-    neighborhood: "Somgandé",
-    status: "inscrit",
-    notes: "Vend Total et Oryx, bon volume de stock.",
-    lat: 12.402,
-    lng: -1.489,
-    accuracy: 8,
-    time: "Hier, 16:42",
-  },
-  {
-    id: "f2",
-    shopName: "Alimentation Sawadogo",
-    phone: "76 22 11 09",
-    city: "Ouagadougou",
-    neighborhood: "Tanghin",
-    status: "prospect",
-    notes: "Intéressé mais veut réfléchir jusqu'à la semaine prochaine.",
-    lat: 12.386,
-    lng: -1.512,
-    accuracy: 12,
-    time: "Hier, 11:05",
-  },
-  {
-    id: "f3",
-    shopName: "",
-    phone: "",
-    city: "Ouagadougou",
-    neighborhood: "Wemtenga",
-    status: "refus",
-    notes: "Pas intéressé",
-    lat: 12.361,
-    lng: -1.498,
-    accuracy: 15,
-    time: "Lundi, 09:18",
-  },
-];
+// Transforme une ligne de la table field_visits en objet utilisé par l'UI
+function mapVisitRow(row) {
+  return {
+    id: row.id,
+    shopName: row.shop_name || "",
+    phone: row.phone || "",
+    city: row.city || "",
+    neighborhood: row.neighborhood || "",
+    status: row.status,
+    notes:
+      row.status === "refus"
+        ? row.details?.reason || ""
+        : row.details?.notes || "",
+    lat: row.latitude,
+    lng: row.longitude,
+    accuracy: row.location_accuracy_meters,
+    time: row.visited_at
+      ? new Date(row.visited_at).toLocaleString("fr-FR", {
+          dateStyle: "short",
+          timeStyle: "short",
+        })
+      : "",
+  };
+}
 
 function StatusBadge({ status }) {
   const meta = STATUS_META[status];
   return (
-    <span
-      className="badge"
-      style={{ color: meta.color, background: meta.bg }}
-    >
+    <span className="badge" style={{ color: meta.color, background: meta.bg }}>
       {meta.label}
     </span>
   );
 }
 
-function LoginScreen({ onLogin }) {
+function LoginScreen() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+    const { error } = await supabase.auth.signInWithPassword({
+      email: email.trim(),
+      password,
+    });
+    setLoading(false);
+    if (error) setError("Email ou mot de passe incorrect.");
+    // en cas de succès, onAuthStateChange (dans App) met à jour la session
+  };
 
   return (
     <div className="screen login-screen">
@@ -92,14 +88,7 @@ function LoginScreen({ onLogin }) {
       <h1 className="login-title">Terrain</h1>
       <p className="login-sub">Fiches de prospection AlloGaz</p>
 
-      <form
-        className="login-form"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (!email.trim()) return;
-          onLogin(email);
-        }}
-      >
+      <form className="login-form" onSubmit={handleSubmit}>
         <label className="field-label" htmlFor="email">
           Email
         </label>
@@ -126,8 +115,16 @@ function LoginScreen({ onLogin }) {
           required
         />
 
-        <button className="btn-primary" type="submit">
-          Se connecter
+        {error && <div className="form-error">{error}</div>}
+
+        <button className="btn-primary" type="submit" disabled={loading}>
+          {loading ? (
+            <>
+              <Loader2 size={16} className="spin" /> Connexion…
+            </>
+          ) : (
+            "Se connecter"
+          )}
         </button>
       </form>
     </div>
@@ -183,7 +180,7 @@ function GpsCapture({ position, onCapture, capturing, error }) {
   );
 }
 
-function NewFicheScreen({ onSave }) {
+function NewFicheScreen({ session, onSaved }) {
   const [status, setStatus] = useState("prospect");
   const [shopName, setShopName] = useState("");
   const [phone, setPhone] = useState("");
@@ -196,6 +193,8 @@ function NewFicheScreen({ onSave }) {
   const [capturing, setCapturing] = useState(false);
   const [gpsError, setGpsError] = useState("");
   const [savedFlash, setSavedFlash] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
 
   const captureGps = () => {
     setGpsError("");
@@ -224,34 +223,45 @@ function NewFicheScreen({ onSave }) {
   };
 
   const isRefus = status === "refus";
-  const canSave =
-    position &&
-    city.trim() &&
-    (isRefus || shopName.trim());
+  const canSave = position && city.trim() && (isRefus || shopName.trim());
 
-  const handleSave = () => {
-    if (!canSave) return;
-    onSave({
-      id: `f${Date.now()}`,
-      shopName: isRefus ? shopName.trim() : shopName.trim(),
-      phone: phone.trim(),
-      city: city.trim(),
-      neighborhood: neighborhood.trim(),
+  const handleSave = async () => {
+    if (!canSave || isSaving) return;
+    setIsSaving(true);
+    setSaveError("");
+
+    const payload = {
+      agent_id: session.user.id,
       status,
-      notes: isRefus ? refusReason : notes.trim(),
-      lat: position.lat,
-      lng: position.lng,
-      accuracy: position.accuracy,
-      time: "À l'instant",
-    });
+      shop_name: shopName.trim() || null,
+      phone: phone.trim() || null,
+      city: city.trim(),
+      neighborhood: neighborhood.trim() || null,
+      latitude: position.lat,
+      longitude: position.lng,
+      location_accuracy_meters: position.accuracy,
+      details: isRefus ? { reason: refusReason } : { notes: notes.trim() },
+    };
+
+    const { error } = await supabase.from("field_visits").insert(payload);
+    setIsSaving(false);
+
+    if (error) {
+      setSaveError(
+        "Échec de l'enregistrement. Vérifiez votre connexion et réessayez."
+      );
+      return;
+    }
+
     setSavedFlash(true);
-    setTimeout(() => setSavedFlash(false), 1800);
+    setTimeout(() => setSavedFlash(false), 1200);
     setShopName("");
     setPhone("");
     setNeighborhood("");
     setNotes("");
     setStatus("prospect");
     setPosition(null);
+    onSaved();
   };
 
   return (
@@ -374,12 +384,18 @@ function NewFicheScreen({ onSave }) {
         )}
       </div>
 
+      {saveError && <div className="form-error">{saveError}</div>}
+
       <button
         className="btn-primary save-btn"
-        disabled={!canSave}
+        disabled={!canSave || isSaving}
         onClick={handleSave}
       >
-        {savedFlash ? (
+        {isSaving ? (
+          <>
+            <Loader2 size={16} className="spin" /> Enregistrement…
+          </>
+        ) : savedFlash ? (
           <>
             <Check size={16} /> Fiche enregistrée
           </>
@@ -425,7 +441,7 @@ function FicheDetail({ fiche, onClose }) {
         <div className="sheet-row">
           <span className="sheet-label">Position</span>
           <span>
-            {fiche.lat.toFixed(5)}, {fiche.lng.toFixed(5)}
+            {fiche.lat?.toFixed(5)}, {fiche.lng?.toFixed(5)}
           </span>
         </div>
         <div className="sheet-row">
@@ -443,7 +459,7 @@ function FicheDetail({ fiche, onClose }) {
   );
 }
 
-function MesFichesScreen({ fiches }) {
+function MesFichesScreen({ fiches, loading }) {
   const [selected, setSelected] = useState(null);
 
   return (
@@ -453,7 +469,9 @@ function MesFichesScreen({ fiches }) {
         <p className="screen-sub">{fiches.length} visite(s) enregistrée(s)</p>
       </div>
 
-      {fiches.length === 0 ? (
+      {loading && fiches.length === 0 ? (
+        <div className="empty-state">Chargement des fiches…</div>
+      ) : fiches.length === 0 ? (
         <div className="empty-state">
           Aucune fiche pour l'instant. Créez-en une depuis l'onglet
           "Nouvelle".
@@ -493,7 +511,7 @@ function MesFichesScreen({ fiches }) {
   );
 }
 
-function ProfilScreen({ agentEmail, fiches, onLogout }) {
+function ProfilScreen({ email, fiches, onLogout }) {
   const counts = fiches.reduce(
     (acc, f) => {
       acc[f.status] = (acc[f.status] || 0) + 1;
@@ -502,7 +520,7 @@ function ProfilScreen({ agentEmail, fiches, onLogout }) {
     { prospect: 0, inscrit: 0, refus: 0 }
   );
 
-  const displayName = agentEmail.split("@")[0].replace(/[._]/g, " ");
+  const displayName = (email || "").split("@")[0].replace(/[._]/g, " ");
 
   return (
     <div className="screen">
@@ -516,7 +534,7 @@ function ProfilScreen({ agentEmail, fiches, onLogout }) {
         </div>
         <div>
           <div className="profile-name">{displayName}</div>
-          <div className="profile-email">{agentEmail}</div>
+          <div className="profile-email">{email}</div>
         </div>
       </div>
 
@@ -553,13 +571,53 @@ function ProfilScreen({ agentEmail, fiches, onLogout }) {
 }
 
 export default function App() {
-  const [agentEmail, setAgentEmail] = useState(null);
+  const [session, setSession] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const [tab, setTab] = useState("new");
-  const [fiches, setFiches] = useState(SEED_FICHES);
+  const [fiches, setFiches] = useState([]);
+  const [fichesLoading, setFichesLoading] = useState(false);
 
-  const addFiche = (fiche) => {
-    setFiches((prev) => [fiche, ...prev]);
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setAuthLoading(false);
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange(
+      (_event, newSession) => {
+        setSession(newSession);
+        setTab("new");
+      }
+    );
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!session) {
+      setFiches([]);
+      return;
+    }
+    fetchFiches();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session]);
+
+  async function fetchFiches() {
+    setFichesLoading(true);
+    const { data, error } = await supabase
+      .from("field_visits")
+      .select("*")
+      .eq("agent_id", session.user.id)
+      .order("visited_at", { ascending: false });
+    if (!error && data) setFiches(data.map(mapVisitRow));
+    setFichesLoading(false);
+  }
+
+  const handleSaved = () => {
+    fetchFiches();
     setTab("list");
+  };
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
   };
 
   return (
@@ -593,6 +651,8 @@ export default function App() {
         .screen-header h2 { font-size: 20px; font-weight: 600; }
         .screen-sub { margin: 4px 0 0; font-size: 13px; color: #6B7A85; }
 
+        .loading-screen { flex: 1; display: flex; align-items: center; justify-content: center; color: #8B9299; font-size: 13.5px; }
+
         /* Login */
         .login-screen { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px 28px; flex: 1; }
         .login-mark { width: 48px; height: 48px; border-radius: 12px; background: var(--gold-bg); color: var(--gold); display: flex; align-items: center; justify-content: center; margin-bottom: 14px; }
@@ -610,6 +670,8 @@ export default function App() {
         .btn-primary { margin-top: 20px; width: 100%; background: var(--ink); color: #fff; border: none; border-radius: 12px; padding: 14px; font-size: 15px; font-weight: 600; font-family: inherit; display: flex; align-items: center; justify-content: center; gap: 8px; cursor: pointer; }
         .btn-primary:disabled { background: #C9CFD3; cursor: not-allowed; }
         .btn-secondary { width: 100%; background: #fff; color: var(--ink); border: 1px solid var(--line); border-radius: 12px; padding: 12px; font-size: 14px; font-weight: 500; font-family: inherit; display: flex; align-items: center; justify-content: center; gap: 8px; cursor: pointer; }
+
+        .form-error { margin-top: 10px; font-size: 12.5px; color: #9B3B2B; }
 
         /* GPS */
         .gps-block { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 14px; margin-bottom: 16px; }
@@ -677,42 +739,32 @@ export default function App() {
         .tab-btn[data-active="true"] { color: var(--gold); }
       `}</style>
 
-      {!agentEmail ? (
-        <LoginScreen onLogin={setAgentEmail} />
+      {authLoading ? (
+        <div className="loading-screen">Chargement…</div>
+      ) : !session ? (
+        <LoginScreen />
       ) : (
         <div style={{ position: "relative", display: "flex", flexDirection: "column", flex: 1 }}>
-          {tab === "new" && <NewFicheScreen onSave={addFiche} />}
-          {tab === "list" && <MesFichesScreen fiches={fiches} />}
+          {tab === "new" && <NewFicheScreen session={session} onSaved={handleSaved} />}
+          {tab === "list" && <MesFichesScreen fiches={fiches} loading={fichesLoading} />}
           {tab === "profil" && (
             <ProfilScreen
-              agentEmail={agentEmail}
+              email={session.user.email}
               fiches={fiches}
-              onLogout={() => setAgentEmail(null)}
+              onLogout={handleLogout}
             />
           )}
 
           <div className="tab-bar">
-            <button
-              className="tab-btn"
-              data-active={tab === "new"}
-              onClick={() => setTab("new")}
-            >
+            <button className="tab-btn" data-active={tab === "new"} onClick={() => setTab("new")}>
               <MapPin size={19} />
               Nouvelle
             </button>
-            <button
-              className="tab-btn"
-              data-active={tab === "list"}
-              onClick={() => setTab("list")}
-            >
+            <button className="tab-btn" data-active={tab === "list"} onClick={() => setTab("list")}>
               <ClipboardList size={19} />
               Mes fiches
             </button>
-            <button
-              className="tab-btn"
-              data-active={tab === "profil"}
-              onClick={() => setTab("profil")}
-            >
+            <button className="tab-btn" data-active={tab === "profil"} onClick={() => setTab("profil")}>
               <User size={19} />
               Profil
             </button>
