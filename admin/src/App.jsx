@@ -53,13 +53,18 @@ function computeBounds(visits) {
   if (lats.length === 0) {
     return { latRange: DEFAULT_LAT_RANGE, lngRange: DEFAULT_LNG_RANGE };
   }
-  const latSpan = Math.max(...lats) - Math.min(...lats) || 0.02;
-  const lngSpan = Math.max(...lngs) - Math.min(...lngs) || 0.02;
-  const latPad = latSpan * 0.2;
-  const lngPad = lngSpan * 0.2;
+  // Zoom minimum garanti : avec 1 ou 2 fiches très proches, on évite de
+  // sur-zoomer sur un point quasi vide et sans repère.
+  const MIN_SPAN = 0.03;
+  const latCenter = (Math.max(...lats) + Math.min(...lats)) / 2;
+  const lngCenter = (Math.max(...lngs) + Math.min(...lngs)) / 2;
+  const latSpan = Math.max(Math.max(...lats) - Math.min(...lats), MIN_SPAN);
+  const lngSpan = Math.max(Math.max(...lngs) - Math.min(...lngs), MIN_SPAN);
+  const latPad = latSpan * 0.25;
+  const lngPad = lngSpan * 0.25;
   return {
-    latRange: [Math.min(...lats) - latPad, Math.max(...lats) + latPad],
-    lngRange: [Math.min(...lngs) - lngPad, Math.max(...lngs) + lngPad],
+    latRange: [latCenter - latSpan / 2 - latPad, latCenter + latSpan / 2 + latPad],
+    lngRange: [lngCenter - lngSpan / 2 - lngPad, lngCenter + lngSpan / 2 + lngPad],
   };
 }
 
@@ -172,33 +177,54 @@ const NEIGHBORHOOD_LABELS = [
   { name: "Wemtenga", lat: 12.360, lng: -1.497 },
 ];
 
-function Marker({ visit, agent, selected, latRange, lngRange, onSelect }) {
+function Marker({ visit, agent, selected, hovered, latRange, lngRange, onSelect, onHover }) {
   const { x, y } = project(visit.lat, visit.lng, latRange, lngRange);
   const color = agent?.color || "#9AA3A9";
+  const label = visit.shopName || "Sans nom (refus)";
+  const emphasized = selected || hovered;
+  const r = emphasized ? 9 : 7;
+  const meta = STATUS_META[visit.status];
 
   return (
     <g
       transform={`translate(${x}, ${y})`}
       onClick={() => onSelect(visit.id)}
+      onMouseEnter={() => onHover(visit.id)}
+      onMouseLeave={() => onHover(null)}
       style={{ cursor: "pointer" }}
     >
-      {selected && (
-        <circle r="14" fill="none" stroke={color} strokeWidth="1.5" opacity="0.45" />
+      <title>{`${label} — ${agent?.name || "Agent inconnu"} — ${meta.label}`}</title>
+
+      {emphasized && (
+        <circle r={r + 8} fill="none" stroke={color} strokeWidth="1.5" opacity="0.45" />
       )}
       {visit.status === "inscrit" && (
-        <circle r="7" fill={color} stroke="#fff" strokeWidth="2" />
+        <circle r={r} fill={color} stroke="#fff" strokeWidth="2" />
       )}
       {visit.status === "prospect" && (
-        <circle r="7" fill="#fff" stroke={color} strokeWidth="2.5" />
+        <circle r={r} fill="#fff" stroke={color} strokeWidth="2.5" />
       )}
       {visit.status === "refus" && (
-        <rect x="-5" y="-5" width="10" height="10" fill={color} opacity="0.5" transform="rotate(45)" />
+        <rect x={-r * 0.7} y={-r * 0.7} width={r * 1.4} height={r * 1.4} fill={color} opacity="0.55" transform="rotate(45)" />
       )}
+
+      <text
+        x={r + 6}
+        y={4}
+        fontSize={emphasized ? "11.5" : "10.5"}
+        fontWeight={emphasized ? "700" : "600"}
+        fontFamily="'IBM Plex Sans', sans-serif"
+        fill="#3B4650"
+        style={{ pointerEvents: "none" }}
+      >
+        {label.length > 20 ? `${label.slice(0, 19)}…` : label}
+      </text>
     </g>
   );
 }
 
 function CityMap({ visits, agentsById, selectedId, onSelect }) {
+  const [hoveredId, setHoveredId] = useState(null);
   const { latRange, lngRange } = useMemo(() => computeBounds(visits), [visits]);
 
   const ordered = useMemo(
@@ -235,9 +261,11 @@ function CityMap({ visits, agentsById, selectedId, onSelect }) {
           visit={v}
           agent={agentsById[v.agentId]}
           selected={v.id === selectedId}
+          hovered={v.id === hoveredId}
           latRange={latRange}
           lngRange={lngRange}
           onSelect={onSelect}
+          onHover={setHoveredId}
         />
       ))}
     </svg>
@@ -478,13 +506,47 @@ function Dashboard({ session }) {
 
         <div className="map-area">
           <div className="map-col">
-            {loading ? (
-              <div className="map-loading">Chargement des visites…</div>
-            ) : (
-              <CityMap visits={visible} agentsById={agentsById} selectedId={selectedId} onSelect={setSelectedId} />
-            )}
+            <div className="map-wrap">
+              {loading ? (
+                <div className="map-loading">Chargement des visites…</div>
+              ) : (
+                <>
+                  <CityMap visits={visible} agentsById={agentsById} selectedId={selectedId} onSelect={setSelectedId} />
+
+                  <div className="map-legend map-legend-status">
+                    <div className="legend-title">Statut</div>
+                    <div className="legend-item">
+                      <span className="legend-shape legend-shape-filled" style={{ "--c": STATUS_META.inscrit.color }} />
+                      Inscrit
+                    </div>
+                    <div className="legend-item">
+                      <span className="legend-shape legend-shape-ring" style={{ "--c": STATUS_META.prospect.color }} />
+                      Prospect
+                    </div>
+                    <div className="legend-item">
+                      <span className="legend-shape legend-shape-diamond" style={{ "--c": STATUS_META.refus.color }} />
+                      Refus
+                    </div>
+                  </div>
+
+                  {agents.filter((a) => selectedAgents.has(a.id)).length > 0 && (
+                    <div className="map-legend map-legend-agents">
+                      <div className="legend-title">Démarcheurs</div>
+                      {agents
+                        .filter((a) => selectedAgents.has(a.id))
+                        .map((a) => (
+                          <div key={a.id} className="legend-item">
+                            <span className="legend-dot" style={{ background: a.color }} />
+                            {a.name}
+                          </div>
+                        ))}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
             <p className="map-caption">
-              Carte simplifiée, cadrée automatiquement sur les fiches existantes — à remplacer par une vraie carte (Mapbox/Google Maps) en production.
+              Carte simplifiée, cadrée automatiquement sur les fiches existantes — à remplacer par une vraie carte (Mapbox/Google Maps) en production. Survolez ou cliquez un point pour le détail.
             </p>
           </div>
 
