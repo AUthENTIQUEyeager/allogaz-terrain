@@ -51,6 +51,51 @@ configurer, contrairement à Google Maps.
   courantes sont MapTiler, Stadia Maps ou Mapbox (clé API requise, avec
   un palier gratuit généreux).
 
+## Créer et gérer les démarcheurs depuis l'admin
+
+Le dashboard admin a maintenant un onglet **Démarcheurs** (à côté de
+"Carte") pour créer des comptes agents et voir la liste, sans repasser
+par le dashboard Supabase à chaque fois.
+
+Trois choses à mettre en place pour que ça marche :
+
+**1. Lancer la migration `0004_agents_management.sql`** (fournie à côté,
+pas dans ce zip) dans le SQL Editor Supabase. Elle ajoute l'email sur
+`profiles` (pour l'afficher dans la liste) et une policy permettant à un
+admin de modifier n'importe quel profil.
+
+**2. Déployer la Edge Function `create-agent`.** C'est elle qui crée
+réellement le compte — la clé secrète Supabase ("service_role", qui
+donne un accès total à la base) ne doit **jamais** être mise dans le
+code React, donc la création de compte passe par une petite fonction
+côté serveur. Le code est dans `supabase/functions/create-agent/index.ts`
+de ce zip. Le plus simple, sans rien installer :
+
+- Dashboard Supabase → **Edge Functions** → **Deploy a new function**
+- Nomme-la exactement `create-agent`
+- Colle le contenu du fichier `index.ts`
+- Déploie
+
+Les clés dont la fonction a besoin (`SUPABASE_URL`, `SUPABASE_ANON_KEY`,
+`SUPABASE_SERVICE_ROLE_KEY`) sont déjà disponibles automatiquement pour
+toute Edge Function — rien à configurer en plus.
+
+(Alternative avec la CLI si tu préfères : `supabase functions deploy
+create-agent`.)
+
+**3. Utiliser l'onglet Démarcheurs.** Renseigne nom + email + mot de
+passe (un bouton "Générer" en propose un), clique "Créer le compte" — le
+compte est créé avec le rôle `demarcheur` directement, il apparaît tout
+de suite dans la liste et sur la carte. Communique ensuite l'email et le
+mot de passe affichés à l'agent pour qu'il se connecte sur l'app
+démarcheur.
+
+## Responsive
+
+Le dashboard admin s'adapte maintenant aux petits écrans : en dessous
+d'environ 900px de large, les filtres passent dans un tiroir accessible
+via le bouton "Filtres", et la carte/liste se réorganisent en colonne.
+
 ## Supabase est déjà branché — il ne reste que la config
 
 Les deux apps utilisent maintenant `@supabase/supabase-js` : vraie

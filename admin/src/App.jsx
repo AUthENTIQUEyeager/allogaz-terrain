@@ -11,6 +11,10 @@ import {
   Store,
   CircleDot,
   Loader2,
+  SlidersHorizontal,
+  X,
+  UserPlus,
+  Map as MapIcon,
 } from "lucide-react";
 
 const STATUS_META = {
@@ -266,6 +270,143 @@ function DetailPanel({ visit, agent }) {
   );
 }
 
+function generatePassword() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+  let out = "";
+  for (let i = 0; i < 10; i++) out += chars[Math.floor(Math.random() * chars.length)];
+  return out;
+}
+
+function AgentsManager({ agents, onAgentCreated }) {
+  const [fullName, setFullName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState(generatePassword);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [successInfo, setSuccessInfo] = useState(null);
+
+  const handleCreate = async (e) => {
+    e.preventDefault();
+    if (!fullName.trim() || !email.trim() || !password.trim()) return;
+    setError("");
+    setSuccessInfo(null);
+    setSubmitting(true);
+
+    const { data, error: invokeError } = await supabase.functions.invoke(
+      "create-agent",
+      { body: { email: email.trim(), password, full_name: fullName.trim() } }
+    );
+
+    setSubmitting(false);
+
+    if (invokeError) {
+      setError(
+        "Échec de la création. Vérifie que la fonction 'create-agent' est bien déployée sur Supabase."
+      );
+      return;
+    }
+    if (data?.error) {
+      setError(data.error);
+      return;
+    }
+
+    setSuccessInfo({ email: email.trim(), password });
+    setFullName("");
+    setEmail("");
+    setPassword(generatePassword());
+    onAgentCreated();
+  };
+
+  return (
+    <div className="agents-manager">
+      <div className="agents-form-card">
+        <h3>
+          <UserPlus size={16} style={{ verticalAlign: -3, marginRight: 6 }} />
+          Nouveau démarcheur
+        </h3>
+        <form onSubmit={handleCreate}>
+          <label className="field-label">Nom complet</label>
+          <input
+            className="text-input"
+            value={fullName}
+            onChange={(e) => setFullName(e.target.value)}
+            required
+          />
+
+          <label className="field-label">Email</label>
+          <input
+            className="text-input"
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            required
+          />
+
+          <label className="field-label">Mot de passe temporaire</label>
+          <div className="password-row">
+            <input
+              className="text-input"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+            />
+            <button
+              type="button"
+              className="btn-secondary small"
+              onClick={() => setPassword(generatePassword())}
+            >
+              Générer
+            </button>
+          </div>
+
+          {error && <div className="form-error">{error}</div>}
+
+          <button className="btn-primary" type="submit" disabled={submitting}>
+            {submitting ? (
+              <>
+                <Loader2 size={16} className="spin" /> Création…
+              </>
+            ) : (
+              "Créer le compte"
+            )}
+          </button>
+        </form>
+
+        {successInfo && (
+          <div className="success-box">
+            Compte créé — communique ces identifiants à l'agent :
+            <div className="cred-line">
+              <strong>Email :</strong> {successInfo.email}
+            </div>
+            <div className="cred-line">
+              <strong>Mot de passe :</strong> {successInfo.password}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="agents-list-card">
+        <h3>Démarcheurs ({agents.length})</h3>
+        {agents.length === 0 ? (
+          <p className="empty-hint">Aucun démarcheur pour l'instant.</p>
+        ) : (
+          <div className="agents-table">
+            {agents.map((a) => (
+              <div key={a.id} className="agents-table-row">
+                <span className="agent-swatch" style={{ background: a.color }} />
+                <div className="agents-table-info">
+                  <div className="agents-table-name">{a.name}</div>
+                  <div className="agents-table-email">{a.email || "—"}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function Dashboard({ session }) {
   const [agents, setAgents] = useState([]);
   const [visits, setVisits] = useState([]);
@@ -274,27 +415,43 @@ function Dashboard({ session }) {
   const [statusFilter, setStatusFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState(null);
+  const [view, setView] = useState("map");
+  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
+
+  async function loadAgents() {
+    const { data } = await supabase
+      .from("profiles")
+      .select("id, full_name, email")
+      .eq("role", "demarcheur");
+    const agentList = (data || []).map((p) => ({
+      id: p.id,
+      name: p.full_name || p.email || "Agent",
+      email: p.email,
+      color: colorForAgent(p.id),
+    }));
+    setAgents(agentList);
+    setSelectedAgents((prev) => {
+      const next = new Set(prev);
+      agentList.forEach((a) => next.add(a.id));
+      return next;
+    });
+  }
+
+  async function loadVisits() {
+    const { data } = await supabase
+      .from("field_visits")
+      .select("*")
+      .order("visited_at", { ascending: false });
+    setVisits((data || []).map(mapVisitRow));
+  }
 
   useEffect(() => {
     let cancelled = false;
 
     async function load() {
       setLoading(true);
-      const [{ data: profileRows }, { data: visitRows }] = await Promise.all([
-        supabase.from("profiles").select("id, full_name").eq("role", "demarcheur"),
-        supabase.from("field_visits").select("*").order("visited_at", { ascending: false }),
-      ]);
-      if (cancelled) return;
-
-      const agentList = (profileRows || []).map((p) => ({
-        id: p.id,
-        name: p.full_name || "Agent",
-        color: colorForAgent(p.id),
-      }));
-      setAgents(agentList);
-      setSelectedAgents(new Set(agentList.map((a) => a.id)));
-      setVisits((visitRows || []).map(mapVisitRow));
-      setLoading(false);
+      await Promise.all([loadAgents(), loadVisits()]);
+      if (!cancelled) setLoading(false);
     }
 
     load();
@@ -382,8 +539,14 @@ function Dashboard({ session }) {
 
   return (
     <div className="dash-body">
-      <aside className="sidebar">
-        <h2>Filtres</h2>
+      <aside className={`sidebar${mobileFiltersOpen ? " mobile-open" : ""}`}>
+        <div className="sidebar-mobile-header">
+          <h2>Filtres</h2>
+          <button className="icon-btn" onClick={() => setMobileFiltersOpen(false)}>
+            <X size={18} />
+          </button>
+        </div>
+        <h2 className="sidebar-title-desktop">Filtres</h2>
         <p className="sidebar-sub">{visible.length} visite(s) affichée(s)</p>
 
         <div className="search-box">
@@ -425,39 +588,66 @@ function Dashboard({ session }) {
         ))}
       </aside>
 
+      {mobileFiltersOpen && (
+        <div className="sidebar-backdrop" onClick={() => setMobileFiltersOpen(false)} />
+      )}
+
       <div className="dash-main">
         <div className="dash-top">
-          <div className="dash-title">Supervision terrain</div>
-          <div className="live-badge">
-            <span className="live-dot" />
-            Temps réel
+          <div className="dash-top-left">
+            <div className="dash-title">Supervision terrain</div>
+            <div className="view-tabs">
+              <button className="view-tab" data-active={view === "map"} onClick={() => setView("map")}>
+                <MapIcon size={13} /> Carte
+              </button>
+              <button className="view-tab" data-active={view === "agents"} onClick={() => setView("agents")}>
+                <Users size={13} /> Démarcheurs
+              </button>
+            </div>
+          </div>
+          <div className="dash-top-right">
+            {view === "map" && (
+              <button className="mobile-filter-btn" onClick={() => setMobileFiltersOpen(true)}>
+                <SlidersHorizontal size={14} /> Filtres
+              </button>
+            )}
+            <div className="live-badge">
+              <span className="live-dot" />
+              Temps réel
+            </div>
           </div>
         </div>
 
-        <div className="kpi-strip">
-          <div className="kpi-item">
-            <span className="kpi-num">{kpi.total}</span>
-            <span className="kpi-label">Visites</span>
+        {view === "agents" ? (
+          <div className="agents-view">
+            <AgentsManager agents={agents} onAgentCreated={loadAgents} />
           </div>
-          <div className="kpi-item">
-            <span className="kpi-num" style={{ color: STATUS_META.prospect.color }}>{kpi.prospect}</span>
-            <span className="kpi-label">Prospects</span>
-          </div>
-          <div className="kpi-item">
-            <span className="kpi-num" style={{ color: STATUS_META.inscrit.color }}>{kpi.inscrit}</span>
-            <span className="kpi-label">Inscrits</span>
-          </div>
-          <div className="kpi-item">
-            <span className="kpi-num" style={{ color: STATUS_META.refus.color }}>{kpi.refus}</span>
-            <span className="kpi-label">Refus</span>
-          </div>
-          <div className="kpi-item">
-            <span className="kpi-num">{kpi.rate}%</span>
-            <span className="kpi-label">Taux de conversion</span>
-          </div>
-        </div>
+        ) : (
+          <>
+            <div className="kpi-strip">
+              <div className="kpi-item">
+                <span className="kpi-num">{kpi.total}</span>
+                <span className="kpi-label">Visites</span>
+              </div>
+              <div className="kpi-item">
+                <span className="kpi-num" style={{ color: STATUS_META.prospect.color }}>{kpi.prospect}</span>
+                <span className="kpi-label">Prospects</span>
+              </div>
+              <div className="kpi-item">
+                <span className="kpi-num" style={{ color: STATUS_META.inscrit.color }}>{kpi.inscrit}</span>
+                <span className="kpi-label">Inscrits</span>
+              </div>
+              <div className="kpi-item">
+                <span className="kpi-num" style={{ color: STATUS_META.refus.color }}>{kpi.refus}</span>
+                <span className="kpi-label">Refus</span>
+              </div>
+              <div className="kpi-item">
+                <span className="kpi-num">{kpi.rate}%</span>
+                <span className="kpi-label">Taux de conversion</span>
+              </div>
+            </div>
 
-        <div className="map-area">
+            <div className="map-area">
           <div className="map-col">
             <div className="map-wrap">
               {loading ? (
@@ -499,7 +689,7 @@ function Dashboard({ session }) {
               )}
             </div>
             <p className="map-caption">
-              Carte simplifiée, cadrée automatiquement sur les fiches existantes — à remplacer par une vraie carte (Mapbox/Google Maps) en production. Survolez ou cliquez un point pour le détail.
+              Survolez ou cliquez un point pour voir le détail. La carte se recadre automatiquement sur les fiches visibles.
             </p>
           </div>
 
@@ -524,6 +714,8 @@ function Dashboard({ session }) {
             </div>
           </div>
         </div>
+        </>
+        )}
       </div>
     </div>
   );
@@ -585,8 +777,11 @@ export default function App() {
         /* Sidebar */
         .sidebar { width: 220px; flex-shrink: 0; background: #fff; border-right: 1px solid var(--line); padding: 20px 16px; overflow-y: auto; }
         .sidebar h2 { font-size: 16px; margin-bottom: 4px; }
+        .sidebar-mobile-header { display: none; align-items: center; justify-content: space-between; margin-bottom: 10px; }
         .sidebar-sub { font-size: 12px; color: #8B9299; margin-bottom: 18px; }
         .empty-hint { font-size: 12px; color: #9AA3A9; }
+        .icon-btn { background: #F0F2F1; border: none; border-radius: 8px; padding: 6px; cursor: pointer; color: var(--ink); display: flex; }
+        .sidebar-backdrop { display: none; }
 
         .search-box { display: flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; margin-bottom: 18px; }
         .search-box input { border: none; outline: none; font-family: inherit; font-size: 13px; width: 100%; background: transparent; color: var(--ink); }
@@ -608,14 +803,20 @@ export default function App() {
 
         /* Main */
         .dash-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-        .dash-top { display: flex; align-items: center; justify-content: space-between; padding: 18px 24px 14px; border-bottom: 1px solid var(--line); background: #fff; }
+        .dash-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 24px; border-bottom: 1px solid var(--line); background: #fff; flex-wrap: wrap; }
+        .dash-top-left { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+        .dash-top-right { display: flex; align-items: center; gap: 12px; }
         .dash-title { font-size: 18px; font-weight: 600; }
-        .live-badge { display: flex; align-items: center; gap: 7px; font-size: 12px; color: #2F6B4F; font-weight: 500; }
+        .view-tabs { display: flex; gap: 4px; background: #F5F3EC; border-radius: 9px; padding: 3px; }
+        .view-tab { display: flex; align-items: center; gap: 6px; border: none; background: none; font-family: inherit; font-size: 12.5px; font-weight: 500; color: #6B7A85; padding: 6px 11px; border-radius: 7px; cursor: pointer; }
+        .view-tab[data-active="true"] { background: #fff; color: var(--ink); font-weight: 600; box-shadow: 0 1px 2px rgba(30,42,51,0.08); }
+        .mobile-filter-btn { display: none; align-items: center; gap: 6px; background: #fff; border: 1px solid var(--line); border-radius: 9px; padding: 7px 12px; font-size: 12.5px; font-family: inherit; cursor: pointer; color: var(--ink); }
+        .live-badge { display: flex; align-items: center; gap: 7px; font-size: 12px; color: #2F6B4F; font-weight: 500; white-space: nowrap; }
         .live-dot { width: 7px; height: 7px; border-radius: 50%; background: #2F6B4F; animation: pulse 1.8s ease-in-out infinite; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
-        .kpi-strip { display: flex; background: #fff; border-bottom: 1px solid var(--line); }
-        .kpi-item { flex: 1; padding: 14px 24px; border-left: 1px solid #F0EEE4; }
+        .kpi-strip { display: flex; background: #fff; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+        .kpi-item { flex: 1; padding: 14px 24px; border-left: 1px solid #F0EEE4; min-width: 110px; }
         .kpi-item:first-child { border-left: none; }
         .kpi-num { font-family: 'Space Grotesk', sans-serif; font-size: 24px; font-weight: 700; display: block; }
         .kpi-label { font-size: 11.5px; color: #8B9299; margin-top: 2px; }
@@ -661,6 +862,62 @@ export default function App() {
         .visit-row-top { display: flex; align-items: center; justify-content: space-between; }
         .visit-shop { font-size: 12.5px; font-weight: 600; }
         .visit-meta { font-size: 11px; color: #9AA3A9; }
+
+        /* Vue "Démarcheurs" */
+        .agents-view { flex: 1; overflow-y: auto; padding: 20px 24px; }
+        .agents-manager { display: grid; grid-template-columns: 340px 1fr; gap: 18px; align-items: start; }
+        .agents-form-card, .agents-list-card { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; }
+        .agents-form-card h3, .agents-list-card h3 { font-size: 15px; margin-bottom: 14px; display: flex; align-items: center; }
+        .password-row { display: flex; gap: 8px; }
+        .password-row .text-input { flex: 1; }
+        .btn-secondary.small { width: auto; padding: 10px 14px; white-space: nowrap; }
+        .success-box { margin-top: 14px; background: #E7F1EC; color: #2F6B4F; border-radius: 10px; padding: 12px 14px; font-size: 12.5px; line-height: 1.6; }
+        .cred-line { margin-top: 2px; }
+        .agents-table { display: flex; flex-direction: column; gap: 4px; }
+        .agents-table-row { display: flex; align-items: center; gap: 10px; padding: 10px 8px; border-radius: 9px; }
+        .agents-table-row:hover { background: #F5F3EC; }
+        .agents-table-info { min-width: 0; }
+        .agents-table-name { font-size: 13px; font-weight: 600; }
+        .agents-table-email { font-size: 11.5px; color: #8B9299; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+        /* ===== Responsive ===== */
+        @media (max-width: 900px) {
+          .dash-shell { min-height: auto; border-radius: 0; }
+          .sidebar-title-desktop { display: none; }
+          .mobile-filter-btn { display: flex; }
+
+          .sidebar { display: none; }
+          .sidebar.mobile-open {
+            display: flex;
+            flex-direction: column;
+            position: fixed;
+            inset: 0;
+            z-index: 2001;
+            width: 85%;
+            max-width: 320px;
+            height: 100%;
+            box-shadow: 2px 0 16px rgba(30,42,51,0.2);
+          }
+          .sidebar-mobile-header { display: flex; }
+          .sidebar-backdrop { display: block; position: fixed; inset: 0; background: rgba(30,42,51,0.4); z-index: 2000; }
+
+          .dash-top { padding: 12px 14px; }
+          .dash-title { font-size: 16px; }
+          .view-tabs { order: 3; width: 100%; }
+
+          .kpi-strip { }
+          .kpi-item { flex: 1 1 33%; padding: 10px 12px; border-bottom: 1px solid #F0EEE4; }
+
+          .map-area { flex-direction: column; }
+          .map-col { padding: 12px; }
+          .map-wrap { min-height: 320px; }
+          .map-legend-agents { max-width: 130px; }
+
+          .right-col { width: 100%; border-left: none; border-top: 1px solid var(--line); max-height: 320px; }
+
+          .agents-view { padding: 14px; }
+          .agents-manager { grid-template-columns: 1fr; }
+        }
       `}</style>
 
       {authLoading ? (
