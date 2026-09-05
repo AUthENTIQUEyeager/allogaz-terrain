@@ -32,6 +32,25 @@ Tu obtiens deux URLs Vercel distinctes (ex :
 propres sous-domaines (`terrain.allogaz.com`, `admin.allogaz.com`) dans
 Vercel → Settings → Domains.
 
+## Carte : Leaflet + CARTO (gratuit, sans clé API)
+
+Le dashboard admin utilise une vraie carte interactive (rues, zoom,
+déplacement) via **Leaflet** avec des fonds de carte **CARTO Voyager**
+(basés sur OpenStreetMap) — entièrement gratuit, aucune clé API à
+configurer, contrairement à Google Maps.
+
+- Chaque marqueur garde son code couleur par agent et sa forme par
+  statut (rond plein = inscrit, rond creux = prospect, losange = refus),
+  avec le nom du commerce affiché à côté du point, et le détail complet
+  au survol/clic.
+- La carte se recadre automatiquement sur les fiches visibles à chaque
+  changement de filtre.
+- Les fonds CARTO sont adaptés à un usage produit normal mais restent un
+  service tiers gratuit avec des limites d'usage raisonnable (pas pensé
+  pour un trafic massif). Si le volume grossit beaucoup, les alternatives
+  courantes sont MapTiler, Stadia Maps ou Mapbox (clé API requise, avec
+  un palier gratuit généreux).
+
 ## Supabase est déjà branché — il ne reste que la config
 
 Les deux apps utilisent maintenant `@supabase/supabase-js` : vraie
@@ -56,9 +75,23 @@ choses à faire pour que ça tourne :
 
 ## Créer les premiers comptes de test
 
-Un compte agent : dans Supabase → Authentication → Users → Add user,
-puis dans SQL Editor : `update public.profiles set role = 'demarcheur' where id = '...';`
-(le trigger `handle_new_user` crée déjà le profil automatiquement à la
-création du compte).
+Crée les comptes dans Supabase → Authentication → Users → Add user, puis
+attribue leur rôle par email (pas besoin de chercher leur UUID à la
+main) — même technique que celle déjà utilisée dans `0001_init.sql`
+pour promouvoir un admin :
 
-Un compte admin : même chose avec `role = 'admin'`.
+```sql
+-- Agent démarcheur
+update public.profiles
+set role = 'demarcheur'
+where id = (select id from auth.users where email = 'agent@allogaz.com');
+
+-- Admin
+update public.profiles
+set role = 'admin'
+where id = (select id from auth.users where email = 'admin@allogaz.com');
+```
+
+Le trigger `handle_new_user` crée déjà le profil automatiquement à la
+création du compte ; ces requêtes ne font que corriger son rôle après
+coup.

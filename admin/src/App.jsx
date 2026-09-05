@@ -1,4 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
+import { MapContainer, TileLayer, Marker as LeafletMarker, Tooltip, useMap } from "react-leaflet";
+import L from "leaflet";
 import { supabase } from "./lib/supabase";
 import {
   Search,
@@ -36,48 +38,9 @@ function colorForAgent(id) {
   return AGENT_PALETTE[hash % AGENT_PALETTE.length];
 }
 
-const MAP_W = 900;
-const MAP_H = 540;
-const PAD = 46;
-
-// Zone par défaut (Ouagadougou) tant qu'aucune fiche n'est encore arrivée
-const DEFAULT_LAT_RANGE = [12.325, 12.418];
-const DEFAULT_LNG_RANGE = [-1.558, -1.455];
-
-function computeBounds(visits) {
-  if (visits.length === 0) {
-    return { latRange: DEFAULT_LAT_RANGE, lngRange: DEFAULT_LNG_RANGE };
-  }
-  const lats = visits.map((v) => v.lat).filter((n) => typeof n === "number");
-  const lngs = visits.map((v) => v.lng).filter((n) => typeof n === "number");
-  if (lats.length === 0) {
-    return { latRange: DEFAULT_LAT_RANGE, lngRange: DEFAULT_LNG_RANGE };
-  }
-  // Zoom minimum garanti : avec 1 ou 2 fiches très proches, on évite de
-  // sur-zoomer sur un point quasi vide et sans repère.
-  const MIN_SPAN = 0.03;
-  const latCenter = (Math.max(...lats) + Math.min(...lats)) / 2;
-  const lngCenter = (Math.max(...lngs) + Math.min(...lngs)) / 2;
-  const latSpan = Math.max(Math.max(...lats) - Math.min(...lats), MIN_SPAN);
-  const lngSpan = Math.max(Math.max(...lngs) - Math.min(...lngs), MIN_SPAN);
-  const latPad = latSpan * 0.25;
-  const lngPad = lngSpan * 0.25;
-  return {
-    latRange: [latCenter - latSpan / 2 - latPad, latCenter + latSpan / 2 + latPad],
-    lngRange: [lngCenter - lngSpan / 2 - lngPad, lngCenter + lngSpan / 2 + lngPad],
-  };
-}
-
-function project(lat, lng, latRange, lngRange) {
-  const x =
-    ((lng - lngRange[0]) / (lngRange[1] - lngRange[0])) * (MAP_W - PAD * 2) +
-    PAD;
-  const y =
-    (1 - (lat - latRange[0]) / (latRange[1] - latRange[0])) *
-      (MAP_H - PAD * 2) +
-    PAD;
-  return { x, y };
-}
+// Centre par défaut (Ouagadougou) tant qu'aucune fiche n'est encore arrivée
+const DEFAULT_CENTER = [12.3714, -1.5197];
+const DEFAULT_ZOOM = 12;
 
 // Transforme une ligne field_visits en objet utilisé par l'UI
 function mapVisitRow(row) {
@@ -164,111 +127,101 @@ function LoginScreen() {
   );
 }
 
-const NEIGHBORHOOD_LABELS = [
-  { name: "Somgandé", lat: 12.406, lng: -1.487 },
-  { name: "Bendogo", lat: 12.413, lng: -1.506 },
-  { name: "Tanghin", lat: 12.388, lng: -1.515 },
-  { name: "Zogona", lat: 12.371, lng: -1.533 },
-  { name: "Dassasgho", lat: 12.384, lng: -1.474 },
-  { name: "Kilwin", lat: 12.397, lng: -1.459 },
-  { name: "Gounghin", lat: 12.353, lng: -1.524 },
-  { name: "Patte d'Oie", lat: 12.335, lng: -1.511 },
-  { name: "Cissin", lat: 12.334, lng: -1.551 },
-  { name: "Wemtenga", lat: 12.360, lng: -1.497 },
-];
+// Icône colorée par agent, formée selon le statut (rond plein = inscrit,
+// rond creux = prospect, losange = refus) — construite en HTML pur pour
+// ne pas dépendre des images d'icône par défaut de Leaflet.
+function buildIcon(color, status, emphasized) {
+  const size = emphasized ? 22 : 16;
+  let html;
+  if (status === "inscrit") {
+    html = `<div style="width:${size}px;height:${size}px;border-radius:50%;background:${color};border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,0.35);"></div>`;
+  } else if (status === "prospect") {
+    html = `<div style="width:${size}px;height:${size}px;border-radius:50%;background:#fff;border:2.5px solid ${color};box-shadow:0 1px 3px rgba(0,0,0,0.35);"></div>`;
+  } else {
+    const d = size * 0.75;
+    html = `<div style="width:${d}px;height:${d}px;background:${color};opacity:0.6;transform:rotate(45deg);box-shadow:0 1px 3px rgba(0,0,0,0.3);"></div>`;
+  }
+  return L.divIcon({
+    html,
+    className: "visit-marker-icon",
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size / 2],
+  });
+}
 
-function Marker({ visit, agent, selected, hovered, latRange, lngRange, onSelect, onHover }) {
-  const { x, y } = project(visit.lat, visit.lng, latRange, lngRange);
+// Recadre automatiquement la carte sur les fiches visibles à chaque
+// changement de filtre, avec un zoom minimum pour ne pas sur-zoomer sur
+// une ou deux fiches très proches.
+function FitToVisits({ visits }) {
+  const map = useMap();
+  useEffect(() => {
+    if (visits.length === 0) return;
+    const bounds = L.latLngBounds(visits.map((v) => [v.lat, v.lng]));
+    map.fitBounds(bounds, { padding: [60, 60], maxZoom: 15 });
+  }, [visits, map]);
+  return null;
+}
+
+function VisitMarker({ visit, agent, selected, hovered, onSelect, onHover }) {
   const color = agent?.color || "#9AA3A9";
-  const label = visit.shopName || "Sans nom (refus)";
   const emphasized = selected || hovered;
-  const r = emphasized ? 9 : 7;
+  const label = visit.shopName || "Sans nom (refus)";
   const meta = STATUS_META[visit.status];
 
+  const icon = useMemo(
+    () => buildIcon(color, visit.status, emphasized),
+    [color, visit.status, emphasized]
+  );
+
   return (
-    <g
-      transform={`translate(${x}, ${y})`}
-      onClick={() => onSelect(visit.id)}
-      onMouseEnter={() => onHover(visit.id)}
-      onMouseLeave={() => onHover(null)}
-      style={{ cursor: "pointer" }}
+    <LeafletMarker
+      position={[visit.lat, visit.lng]}
+      icon={icon}
+      eventHandlers={{
+        click: () => onSelect(visit.id),
+        mouseover: () => onHover(visit.id),
+        mouseout: () => onHover(null),
+      }}
     >
-      <title>{`${label} — ${agent?.name || "Agent inconnu"} — ${meta.label}`}</title>
-
-      {emphasized && (
-        <circle r={r + 8} fill="none" stroke={color} strokeWidth="1.5" opacity="0.45" />
-      )}
-      {visit.status === "inscrit" && (
-        <circle r={r} fill={color} stroke="#fff" strokeWidth="2" />
-      )}
-      {visit.status === "prospect" && (
-        <circle r={r} fill="#fff" stroke={color} strokeWidth="2.5" />
-      )}
-      {visit.status === "refus" && (
-        <rect x={-r * 0.7} y={-r * 0.7} width={r * 1.4} height={r * 1.4} fill={color} opacity="0.55" transform="rotate(45)" />
-      )}
-
-      <text
-        x={r + 6}
-        y={4}
-        fontSize={emphasized ? "11.5" : "10.5"}
-        fontWeight={emphasized ? "700" : "600"}
-        fontFamily="'IBM Plex Sans', sans-serif"
-        fill="#3B4650"
-        style={{ pointerEvents: "none" }}
-      >
-        {label.length > 20 ? `${label.slice(0, 19)}…` : label}
-      </text>
-    </g>
+      <Tooltip permanent direction="right" offset={[10, 0]} className="marker-label" opacity={1}>
+        {label}
+      </Tooltip>
+      <Tooltip direction="top" offset={[0, -8]} className="marker-hover-tip">
+        {label} — {agent?.name || "Agent inconnu"} — {meta.label}
+      </Tooltip>
+    </LeafletMarker>
   );
 }
 
 function CityMap({ visits, agentsById, selectedId, onSelect }) {
   const [hoveredId, setHoveredId] = useState(null);
-  const { latRange, lngRange } = useMemo(() => computeBounds(visits), [visits]);
-
-  const ordered = useMemo(
-    () => [...visits].sort((a, b) => (a.id === selectedId ? 1 : b.id === selectedId ? -1 : 0)),
-    [visits, selectedId]
-  );
 
   return (
-    <svg viewBox={`0 0 ${MAP_W} ${MAP_H}`} className="city-map">
-      <rect width={MAP_W} height={MAP_H} fill="#F5F1E7" />
-
-      {Array.from({ length: 13 }).map((_, i) => (
-        <line key={`v${i}`} x1={PAD + i * 66} y1={0} x2={PAD + i * 66} y2={MAP_H} stroke="#E4DCC9" strokeWidth="1" />
-      ))}
-      {Array.from({ length: 9 }).map((_, i) => (
-        <line key={`h${i}`} x1={0} y1={PAD + i * 58} x2={MAP_W} y2={PAD + i * 58} stroke="#E4DCC9" strokeWidth="1" />
-      ))}
-      <line x1="0" y1="70" x2={MAP_W} y2="330" stroke="#DCD2B8" strokeWidth="3" />
-      <line x1="120" y1="0" x2="640" y2={MAP_H} stroke="#DCD2B8" strokeWidth="3" />
-
-      {NEIGHBORHOOD_LABELS.map((n) => {
-        const { x, y } = project(n.lat, n.lng, latRange, lngRange);
-        if (x < 0 || x > MAP_W || y < 0 || y > MAP_H) return null;
-        return (
-          <text key={n.name} x={x} y={y} fontSize="11.5" fill="#A79E86" fontFamily="'Space Grotesk', sans-serif" fontWeight="600" textAnchor="middle">
-            {n.name.toUpperCase()}
-          </text>
-        );
-      })}
-
-      {ordered.map((v) => (
-        <Marker
+    <MapContainer
+      center={DEFAULT_CENTER}
+      zoom={DEFAULT_ZOOM}
+      className="city-map"
+      scrollWheelZoom={true}
+    >
+      <TileLayer
+        url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
+        attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+        subdomains="abcd"
+        maxZoom={19}
+      />
+      <FitToVisits visits={visits} />
+      {visits.map((v) => (
+        <VisitMarker
           key={v.id}
           visit={v}
           agent={agentsById[v.agentId]}
           selected={v.id === selectedId}
           hovered={v.id === hoveredId}
-          latRange={latRange}
-          lngRange={lngRange}
           onSelect={onSelect}
           onHover={setHoveredId}
         />
       ))}
-    </svg>
+    </MapContainer>
   );
 }
 
@@ -669,9 +622,27 @@ export default function App() {
 
         .map-area { flex: 1; display: flex; min-height: 0; }
         .map-col { flex: 1; padding: 18px; display: flex; flex-direction: column; min-width: 0; }
-        .city-map { width: 100%; flex: 1; border-radius: 12px; border: 1px solid var(--line); }
+        .map-wrap { position: relative; flex: 1; display: flex; min-height: 420px; }
+        .city-map { width: 100%; height: 100%; border-radius: 12px; border: 1px solid var(--line); z-index: 0; }
         .map-loading { flex: 1; display: flex; align-items: center; justify-content: center; color: #9AA3A9; font-size: 13px; border: 1px solid var(--line); border-radius: 12px; }
         .map-caption { font-size: 11.5px; color: #9AA3A9; margin-top: 8px; }
+
+        /* Légendes flottantes sur la carte */
+        .map-legend { position: absolute; z-index: 500; background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; box-shadow: 0 2px 8px rgba(30,42,51,0.1); font-size: 11.5px; }
+        .map-legend-status { top: 12px; left: 12px; }
+        .map-legend-agents { top: 12px; right: 12px; max-height: 180px; overflow-y: auto; max-width: 170px; }
+        .legend-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; color: #9AA3A9; margin-bottom: 6px; }
+        .legend-item { display: flex; align-items: center; gap: 7px; color: #5A6670; padding: 2px 0; white-space: nowrap; }
+        .legend-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+        .legend-shape { flex-shrink: 0; }
+        .legend-shape-filled { width: 9px; height: 9px; border-radius: 50%; background: var(--c); border: 1.5px solid #fff; outline: 1px solid var(--c); }
+        .legend-shape-ring { width: 9px; height: 9px; border-radius: 50%; background: #fff; border: 2px solid var(--c); }
+        .legend-shape-diamond { width: 8px; height: 8px; background: var(--c); opacity: 0.6; transform: rotate(45deg); }
+
+        /* Étiquette permanente à côté de chaque marqueur */
+        .leaflet-tooltip.marker-label { background: rgba(255,255,255,0.92); border: none; box-shadow: none; padding: 1px 5px; font-family: 'IBM Plex Sans', sans-serif; font-size: 11px; font-weight: 600; color: #3B4650; border-radius: 4px; }
+        .leaflet-tooltip.marker-label::before { display: none; }
+        .leaflet-tooltip.marker-hover-tip { font-family: 'IBM Plex Sans', sans-serif; font-size: 11.5px; }
 
         .right-col { width: 300px; flex-shrink: 0; border-left: 1px solid var(--line); background: #fff; display: flex; flex-direction: column; }
         .detail-empty { flex-shrink: 0; padding: 30px 20px; text-align: center; color: #9AA3A9; font-size: 12.5px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; align-items: center; gap: 10px; }
